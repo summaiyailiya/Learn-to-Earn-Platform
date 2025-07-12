@@ -35,6 +35,28 @@
     uint
 )
 
+(define-map achievements
+    { achievement-id: uint }
+    {
+        name: (string-ascii 32),
+        description: (string-ascii 128),
+        milestone-type: (string-ascii 16),
+        milestone-value: uint,
+        reward-bonus: uint,
+    }
+)
+
+(define-map user-achievements
+    {
+        user: principal,
+        achievement-id: uint,
+    }
+    {
+        earned: bool,
+        earned-time: uint,
+    }
+)
+
 (define-read-only (get-balance (account principal))
     (default-to u0 (map-get? balances account))
 )
@@ -51,6 +73,97 @@
         user: user,
         module-id: module-id,
     })
+)
+
+(define-read-only (get-achievement (achievement-id uint))
+    (map-get? achievements { achievement-id: achievement-id })
+)
+
+(define-read-only (get-user-achievement
+        (user principal)
+        (achievement-id uint)
+    )
+    (map-get? user-achievements {
+        user: user,
+        achievement-id: achievement-id,
+    })
+)
+
+(define-private (get-user-completed-modules (user principal))
+    (get count
+        (fold count-completed-modules
+            (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10 u11 u12 u13 u14 u15) {
+            user: user,
+            count: u0,
+        })
+    )
+)
+
+(define-private (count-completed-modules
+        (module-id uint)
+        (acc {
+            user: principal,
+            count: uint,
+        })
+    )
+    (let ((progress (get-user-progress (get user acc) module-id)))
+        (if (and (is-some progress) (get completed (unwrap-panic progress)))
+            {
+                user: (get user acc),
+                count: (+ (get count acc) u1),
+            }
+            acc
+        )
+    )
+)
+
+(define-private (check-module-milestone
+        (user principal)
+        (target-count uint)
+        (achievement-id uint)
+    )
+    (let (
+            (current-count (get-user-completed-modules user))
+            (achievement (get-achievement achievement-id))
+            (user-achievement (get-user-achievement user achievement-id))
+        )
+        (if (and
+                (>= current-count target-count)
+                (is-some achievement)
+                (is-none user-achievement)
+            )
+            (begin
+                (map-set user-achievements {
+                    user: user,
+                    achievement-id: achievement-id,
+                } {
+                    earned: true,
+                    earned-time: burn-block-height,
+                })
+                (mint-reward user (get reward-bonus (unwrap-panic achievement)))
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-private (check-achievements (user principal))
+    (begin
+        (unwrap-panic (check-module-milestone user u3 u1))
+        (unwrap-panic (check-module-milestone user u5 u2))
+        (unwrap-panic (check-module-milestone user u10 u3))
+        (ok true)
+    )
+)
+
+(define-private (mint-reward
+        (user principal)
+        (amount uint)
+    )
+    (begin
+        (var-set total-supply (+ (var-get total-supply) amount))
+        (ok (map-set balances user (+ (get-balance user) amount)))
+    )
 )
 
 (define-public (create-module
@@ -94,17 +207,9 @@
             rewarded: false,
             completion-time: burn-block-height,
         })
-        (mint-reward tx-sender (get reward module))
-    )
-)
-
-(define-private (mint-reward
-        (user principal)
-        (amount uint)
-    )
-    (begin
-        (var-set total-supply (+ (var-get total-supply) amount))
-        (ok (map-set balances user (+ (get-balance user) amount)))
+        (unwrap-panic (mint-reward tx-sender (get reward module)))
+        (unwrap-panic (check-achievements tx-sender))
+        (ok true)
     )
 )
 
@@ -116,5 +221,26 @@
         (asserts! (>= sender-balance amount) (err u1))
         (map-set balances tx-sender (- sender-balance amount))
         (ok (map-set balances recipient (+ (get-balance recipient) amount)))
+    )
+)
+
+(define-public (create-achievement
+        (achievement-id uint)
+        (name (string-ascii 32))
+        (description (string-ascii 128))
+        (milestone-type (string-ascii 16))
+        (milestone-value uint)
+        (reward-bonus uint)
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (is-none (get-achievement achievement-id)) err-already-exists)
+        (ok (map-set achievements { achievement-id: achievement-id } {
+            name: name,
+            description: description,
+            milestone-type: milestone-type,
+            milestone-value: milestone-value,
+            reward-bonus: reward-bonus,
+        }))
     )
 )
