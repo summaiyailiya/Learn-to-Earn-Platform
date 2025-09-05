@@ -57,6 +57,28 @@
     }
 )
 
+(define-map leaderboard-entry
+    principal
+    {
+        modules-completed: uint,
+        total-rewards: uint,
+        last-activity: uint,
+    }
+)
+
+(define-data-var leaderboard-size uint u10)
+
+(define-data-var staking-apy uint u500)
+
+(define-map user-stakes
+    principal
+    {
+        amount: uint,
+        start-block: uint,
+        last-claim-block: uint,
+    }
+)
+
 (define-read-only (get-balance (account principal))
     (default-to u0 (map-get? balances account))
 )
@@ -87,6 +109,44 @@
         user: user,
         achievement-id: achievement-id,
     })
+)
+
+(define-read-only (get-leaderboard-entry (user principal))
+    (map-get? leaderboard-entry user)
+)
+
+(define-read-only (get-user-stake (user principal))
+    (map-get? user-stakes user)
+)
+
+(define-read-only (calculate-staking-rewards (user principal))
+    (let ((stake-info (get-user-stake user)))
+        (if (is-some stake-info)
+            (let ((stake-data (unwrap-panic stake-info)))
+                (let ((blocks-staked (- burn-block-height (get last-claim-block stake-data))))
+                    (if (> blocks-staked u0)
+                        (/
+                            (* (get amount stake-data) (var-get staking-apy)
+                                blocks-staked
+                            )
+                            u10000000
+                        )
+                        u0
+                    )
+                )
+            )
+            u0
+        )
+    )
+)
+
+(define-read-only (get-user-rank (user principal))
+    (let ((user-entry (get-leaderboard-entry user)))
+        (if (is-some user-entry)
+            (some u1)
+            none
+        )
+    )
 )
 
 (define-private (get-user-completed-modules (user principal))
@@ -166,6 +226,21 @@
     )
 )
 
+(define-private (update-leaderboard (user principal))
+    (let (
+            (current-modules (get-user-completed-modules user))
+            (current-balance (get-balance user))
+            (existing-entry (get-leaderboard-entry user))
+        )
+        (map-set leaderboard-entry user {
+            modules-completed: current-modules,
+            total-rewards: current-balance,
+            last-activity: burn-block-height,
+        })
+        (ok true)
+    )
+)
+
 (define-public (create-module
         (module-id uint)
         (title (string-ascii 64))
@@ -209,6 +284,7 @@
         })
         (unwrap-panic (mint-reward tx-sender (get reward module)))
         (unwrap-panic (check-achievements tx-sender))
+        (unwrap-panic (update-leaderboard tx-sender))
         (ok true)
     )
 )
@@ -242,5 +318,79 @@
             milestone-value: milestone-value,
             reward-bonus: reward-bonus,
         }))
+    )
+)
+
+(define-public (stake-tokens (amount uint))
+    (let (
+            (current-balance (get-balance tx-sender))
+            (existing-stake (get-user-stake tx-sender))
+        )
+        (asserts! (>= current-balance amount) (err u1))
+        (asserts! (> amount u0) (err u2))
+        (map-set balances tx-sender (- current-balance amount))
+        (if (is-some existing-stake)
+            (let ((stake-data (unwrap-panic existing-stake)))
+                (map-set user-stakes tx-sender {
+                    amount: (+ (get amount stake-data) amount),
+                    start-block: (get start-block stake-data),
+                    last-claim-block: burn-block-height,
+                })
+            )
+            (map-set user-stakes tx-sender {
+                amount: amount,
+                start-block: burn-block-height,
+                last-claim-block: burn-block-height,
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (unstake-tokens (amount uint))
+    (let ((stake-info (unwrap! (get-user-stake tx-sender) (err u404))))
+        (asserts! (>= (get amount stake-info) amount) (err u1))
+        (asserts! (> amount u0) (err u2))
+        (let ((pending-rewards (calculate-staking-rewards tx-sender)))
+            (if (> pending-rewards u0)
+                (begin
+                    (unwrap-panic (mint-reward tx-sender pending-rewards))
+                    true
+                )
+                true
+            )
+        )
+        (map-set balances tx-sender (+ (get-balance tx-sender) amount))
+        (if (is-eq (get amount stake-info) amount)
+            (map-delete user-stakes tx-sender)
+            (map-set user-stakes tx-sender {
+                amount: (- (get amount stake-info) amount),
+                start-block: (get start-block stake-info),
+                last-claim-block: burn-block-height,
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (claim-staking-rewards)
+    (let (
+            (pending-rewards (calculate-staking-rewards tx-sender))
+            (stake-info (unwrap! (get-user-stake tx-sender) (err u404)))
+        )
+        (asserts! (> pending-rewards u0) (err u3))
+        (map-set user-stakes tx-sender {
+            amount: (get amount stake-info),
+            start-block: (get start-block stake-info),
+            last-claim-block: burn-block-height,
+        })
+        (mint-reward tx-sender pending-rewards)
+    )
+)
+
+(define-public (set-staking-apy (new-apy uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (ok (var-set staking-apy new-apy))
     )
 )
