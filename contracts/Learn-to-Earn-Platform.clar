@@ -79,6 +79,27 @@
     }
 )
 
+(define-data-var referral-reward uint u100)
+(define-data-var referee-bonus uint u50)
+
+(define-map referrals
+    principal
+    {
+        referrer: (optional principal),
+        total-referrals: uint,
+        successful-referrals: uint,
+        total-earned: uint,
+    }
+)
+
+(define-map referral-milestones
+    uint
+    {
+        required-referrals: uint,
+        bonus-reward: uint,
+    }
+)
+
 (define-read-only (get-balance (account principal))
     (default-to u0 (map-get? balances account))
 )
@@ -117,6 +138,21 @@
 
 (define-read-only (get-user-stake (user principal))
     (map-get? user-stakes user)
+)
+
+(define-read-only (get-referral-info (user principal))
+    (default-to {
+        referrer: none,
+        total-referrals: u0,
+        successful-referrals: u0,
+        total-earned: u0,
+    }
+        (map-get? referrals user)
+    )
+)
+
+(define-read-only (get-referral-milestone (milestone-id uint))
+    (map-get? referral-milestones milestone-id)
 )
 
 (define-read-only (calculate-staking-rewards (user principal))
@@ -216,6 +252,78 @@
     )
 )
 
+(define-private (process-referral-reward (user principal))
+    (let ((ref-info (get-referral-info user)))
+        (if (is-some (get referrer ref-info))
+            (let (
+                    (referrer-principal (unwrap-panic (get referrer ref-info)))
+                    (referrer-info (get-referral-info referrer-principal))
+                )
+                (map-set referrals referrer-principal {
+                    referrer: (get referrer referrer-info),
+                    total-referrals: (get total-referrals referrer-info),
+                    successful-referrals: (+ (get successful-referrals referrer-info) u1),
+                    total-earned: (+ (get total-earned referrer-info) (var-get referral-reward)),
+                })
+                (unwrap-panic (mint-reward referrer-principal (var-get referral-reward)))
+                (unwrap-panic (mint-reward user (var-get referee-bonus)))
+                (unwrap-panic (check-referral-milestones referrer-principal))
+                (ok true)
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-private (check-referral-milestones (user principal))
+    (let ((ref-info (get-referral-info user)))
+        (begin
+            (unwrap-panic (check-single-milestone user (get successful-referrals ref-info) u1))
+            (unwrap-panic (check-single-milestone user (get successful-referrals ref-info) u2))
+            (unwrap-panic (check-single-milestone user (get successful-referrals ref-info) u3))
+            (ok true)
+        )
+    )
+)
+
+(define-private (check-single-milestone
+        (user principal)
+        (current-referrals uint)
+        (milestone-id uint)
+    )
+    (let ((milestone (get-referral-milestone milestone-id)))
+        (if (is-some milestone)
+            (let (
+                    (milestone-data (unwrap-panic milestone))
+                    (ref-info (get-referral-info user))
+                )
+                (if (and
+                        (>= current-referrals
+                            (get required-referrals milestone-data)
+                        )
+                        (< (- current-referrals u1)
+                            (get required-referrals milestone-data)
+                        )
+                    )
+                    (begin
+                        (map-set referrals user {
+                            referrer: (get referrer ref-info),
+                            total-referrals: (get total-referrals ref-info),
+                            successful-referrals: (get successful-referrals ref-info),
+                            total-earned: (+ (get total-earned ref-info)
+                                (get bonus-reward milestone-data)
+                            ),
+                        })
+                        (mint-reward user (get bonus-reward milestone-data))
+                    )
+                    (ok true)
+                )
+            )
+            (ok true)
+        )
+    )
+)
+
 (define-private (mint-reward
         (user principal)
         (amount uint)
@@ -285,6 +393,10 @@
         (unwrap-panic (mint-reward tx-sender (get reward module)))
         (unwrap-panic (check-achievements tx-sender))
         (unwrap-panic (update-leaderboard tx-sender))
+        (if (is-eq (get-user-completed-modules tx-sender) u1)
+            (unwrap-panic (process-referral-reward tx-sender))
+            true
+        )
         (ok true)
     )
 )
@@ -392,5 +504,58 @@
     (begin
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
         (ok (var-set staking-apy new-apy))
+    )
+)
+
+(define-public (register-referral (referrer principal))
+    (let ((existing-ref (get-referral-info tx-sender)))
+        (asserts! (is-none (get referrer existing-ref)) err-already-exists)
+        (asserts! (not (is-eq referrer tx-sender)) (err u5))
+        (let ((referrer-info (get-referral-info referrer)))
+            (map-set referrals referrer {
+                referrer: (get referrer referrer-info),
+                total-referrals: (+ (get total-referrals referrer-info) u1),
+                successful-referrals: (get successful-referrals referrer-info),
+                total-earned: (get total-earned referrer-info),
+            })
+            (map-set referrals tx-sender {
+                referrer: (some referrer),
+                total-referrals: u0,
+                successful-referrals: u0,
+                total-earned: u0,
+            })
+            (ok true)
+        )
+    )
+)
+
+(define-public (create-referral-milestone
+        (milestone-id uint)
+        (required-referrals uint)
+        (bonus-reward uint)
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (is-none (get-referral-milestone milestone-id))
+            err-already-exists
+        )
+        (ok (map-set referral-milestones milestone-id {
+            required-referrals: required-referrals,
+            bonus-reward: bonus-reward,
+        }))
+    )
+)
+
+(define-public (set-referral-reward (new-reward uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (ok (var-set referral-reward new-reward))
+    )
+)
+
+(define-public (set-referee-bonus (new-bonus uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (ok (var-set referee-bonus new-bonus))
     )
 )
