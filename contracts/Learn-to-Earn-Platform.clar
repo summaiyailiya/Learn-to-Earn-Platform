@@ -559,3 +559,27 @@
         (ok (var-set referee-bonus new-bonus))
     )
 )
+
+(define-private (apply-airdrop
+        (item {
+            recipient: principal,
+            amount: uint,
+        })
+        (acc bool)
+    )
+    (begin
+        (unwrap-panic (mint-reward (get recipient item) (get amount item)))
+        true
+    )
+)
+
+(define-public (airdrop-rewards (items (list 200 {
+    recipient: principal,
+    amount: uint,
+})))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (fold apply-airdrop items true)
+        (ok true)
+    )
+)
